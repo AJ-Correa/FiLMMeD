@@ -9,7 +9,6 @@ from MDVRPEnv import MDVRPEnv
 from VRPEnv import VRPEnv
 from VRPModel import VRPModel as Model
 from VRPFineTuner import VRPFineTuner as Tuner
-from LocalSearch import run_local_search
 
 from utils.utils import *
 
@@ -328,38 +327,6 @@ class VRPTester:
                 no_aug_score = (no_aug_score * scale).item()
                 aug_score = (aug_score * scale).item()
 
-                if self.tester_params['run_local_search']:
-                    aug_factor = aug_reward.size(0)
-
-                    scores = aug_reward.reshape(-1)
-                    best_idx = torch.argmax(scores).item()
-
-                    best_aug = best_idx // self.env.pomo_size
-                    best_pomo = best_idx % self.env.pomo_size
-
-                    sol = self.env.selected_node_list.reshape(aug_factor, 1, self.env.pomo_size, -1)
-                    best_solution = sol[best_aug, 0, best_pomo].cpu().numpy()
-
-                    if 'Solomon' in path:
-                        ls_score = run_local_search(best_solution,
-                                                    self.tester_params,
-                                                    1,
-                                                    original_locations.squeeze()[1:],
-                                                    (node_demand[0] * capacity).cpu().numpy(),
-                                                    original_locations.squeeze()[:1],
-                                                    [capacity],
-                                                    service_durations=(service_time * scale).cpu().numpy().squeeze(),
-                                                    early_tws=(tw_start * scale).cpu().numpy().squeeze(),
-                                                    late_tws=(tw_end * scale).cpu().numpy().squeeze())
-                    else:
-                        ls_score = run_local_search(best_solution,
-                                                    self.tester_params,
-                                                    1,
-                                                    original_locations.squeeze()[1:],
-                                                    (node_demand[0] * capacity).cpu().numpy(),
-                                                    original_locations.squeeze()[:1],
-                                                    [capacity])
-
                 sol_path = path.replace(".vrp", ".sol").replace(".txt", ".sol")
                 bks_cost = None
                 if os.path.exists(sol_path):
@@ -379,20 +346,10 @@ class VRPTester:
                 else:
                     no_aug_gap = aug_gap = None
 
-                # --- Conditional printing ---
-                if self.tester_params['run_local_search']:
-                    ls_gap = (ls_score - bks_cost) / bks_cost * 100
-                    ls_gap_list.append(ls_gap)
-                    print(f">> Test Score on {path} -> \n"
-                          f"NO_AUG: {round(no_aug_score, 3)} | NO_AUG_GAP: {no_aug_gap if no_aug_gap is not None else 'N/A'}%\n"
-                          f"AUG: {round(aug_score, 3)} | AUG_GAP: {aug_gap if aug_gap is not None else 'N/A'}%\n"
-                          f"TuneNSearch: {round(ls_score, 3)} | TuneNSearch_GAP: {round(ls_gap, 3) if ls_gap is not None else 'N/A'}%\n"
-                          f"BKS: {bks_cost if bks_cost is not None else 'N/A'}\n")
-                else:
-                    print(f">> Test Score on {path} -> \n"
-                          f"NO_AUG: {round(no_aug_score, 3)} | NO_AUG_GAP: {no_aug_gap if no_aug_gap is not None else 'N/A'}%\n"
-                          f"AUG: {round(aug_score, 3)} | AUG_GAP: {aug_gap if aug_gap is not None else 'N/A'}%\n"
-                          f"BKS: {bks_cost if bks_cost is not None else 'N/A'}\n")
+                print(f">> Test Score on {path} -> \n"
+                        f"NO_AUG: {round(no_aug_score, 3)} | NO_AUG_GAP: {no_aug_gap if no_aug_gap is not None else 'N/A'}%\n"
+                        f"AUG: {round(aug_score, 3)} | AUG_GAP: {aug_gap if aug_gap is not None else 'N/A'}%\n"
+                        f"BKS: {bks_cost if bks_cost is not None else 'N/A'}\n")
 
         # --- elapsed time ---
         elapsed_time = time.time() - start_time
@@ -404,11 +361,6 @@ class VRPTester:
         print(f"\n>> Elapsed time: {elapsed_time:.2f}s")
         print(f">> Mean NO_AUG gap: {mean_no_aug_gap if mean_no_aug_gap is not None else 'N/A'}%")
         print(f">> Mean AUG gap: {mean_aug_gap if mean_aug_gap is not None else 'N/A'}%")
-
-        # --- Conditional printing for Local Search ---
-        if self.tester_params['run_local_search'] and ls_gap_list:  # make sure you collected LS gaps
-            mean_ls_gap = round(np.mean(ls_gap_list), 3)
-            print(f">> Mean TuneNSearch gap: {mean_ls_gap if mean_ls_gap is not None else 'N/A'}%")
 
     def _solve_mdvrplib_(self):
         """
@@ -523,56 +475,6 @@ class VRPTester:
                 no_aug_score = (no_aug_score * scale).item()
                 aug_score = (aug_score * scale).item()
 
-                if self.tester_params['run_local_search']:
-                    aug_factor = aug_reward.size(0)
-
-                    scores = aug_reward.reshape(-1)
-                    best_idx = torch.argmax(scores).item()
-
-                    best_aug = best_idx // self.env.pomo_size
-                    best_pomo = best_idx % self.env.pomo_size
-
-                    sol = self.env.selected_node_list.reshape(aug_factor, 1, self.env.pomo_size, -1)
-                    best_solution = sol[best_aug, 0, best_pomo].cpu().numpy()
-
-                    # --- Handle depot remapping based on augmentation ---
-                    if aug_factor == num_depots * 8:  # full depot-wise 8-augmentation
-                        depot_idx_for_aug = best_aug // 8
-                        best_solution = np.array([
-                            depot_idx_for_aug if node == 0 else
-                            0 if node == depot_idx_for_aug else
-                            node
-                            for node in best_solution
-                        ])
-                    elif aug_factor == 7 + num_depots:  # 7 + depot_size augmentation
-                        # Determine which “swapped depot” the solution corresponds to
-                        # First 8 are geometric augmentations of original depot 0
-                        if best_aug < 8:
-                            depot_idx_for_aug = 0
-                        else:
-                            # The remaining num_depots - 1 correspond to swapped depots
-                            depot_idx_for_aug = (best_aug - 8) + 1  # +1 because depot 0 is first
-                        best_solution = np.array([
-                            depot_idx_for_aug if node == 0 else
-                            0 if node == depot_idx_for_aug else
-                            node
-                            for node in best_solution
-                        ])
-                    else:
-                        # No remapping needed
-                        pass
-
-                    ls_score = run_local_search(best_solution,
-                                                self.tester_params,
-                                                num_depots,
-                                                original_locations[:-num_depots, :],
-                                                demand, original_locations[-num_depots:, :],
-                                                capacities,
-                                                route_length_limits,
-                                                service_durations,
-                                                early_tws,
-                                                late_tws)
-
                 root, ext = os.path.splitext(path)  # splits "file.ext" into ("file", ".ext")
                 sol_path = root + ".res"
                 bks_cost = None
@@ -592,20 +494,10 @@ class VRPTester:
                 else:
                     no_aug_gap = aug_gap = None
 
-                # --- Conditional printing ---
-                if self.tester_params['run_local_search']:
-                    ls_gap = (ls_score - bks_cost) / bks_cost * 100
-                    ls_gap_list.append(ls_gap)
-                    print(f">> Test Score on {path} -> \n"
-                          f"NO_AUG: {round(no_aug_score, 3)} | NO_AUG_GAP: {no_aug_gap if no_aug_gap is not None else 'N/A'}%\n"
-                          f"AUG: {round(aug_score, 3)} | AUG_GAP: {aug_gap if aug_gap is not None else 'N/A'}%\n"
-                          f"TuneNSearch: {round(ls_score, 3)} | TuneNSearch_GAP: {round(ls_gap, 3) if ls_gap is not None else 'N/A'}%\n"
-                          f"BKS: {bks_cost if bks_cost is not None else 'N/A'}\n")
-                else:
-                    print(f">> Test Score on {path} -> \n"
-                          f"NO_AUG: {round(no_aug_score, 3)} | NO_AUG_GAP: {no_aug_gap if no_aug_gap is not None else 'N/A'}%\n"
-                          f"AUG: {round(aug_score, 3)} | AUG_GAP: {aug_gap if aug_gap is not None else 'N/A'}%\n"
-                          f"BKS: {bks_cost if bks_cost is not None else 'N/A'}\n")
+                print(f">> Test Score on {path} -> \n"
+                        f"NO_AUG: {round(no_aug_score, 3)} | NO_AUG_GAP: {no_aug_gap if no_aug_gap is not None else 'N/A'}%\n"
+                        f"AUG: {round(aug_score, 3)} | AUG_GAP: {aug_gap if aug_gap is not None else 'N/A'}%\n"
+                        f"BKS: {bks_cost if bks_cost is not None else 'N/A'}\n")
 
         # --- elapsed time ---
         elapsed_time = time.time() - start_time
@@ -617,8 +509,3 @@ class VRPTester:
         print(f"\n>> Elapsed time: {elapsed_time:.2f}s")
         print(f">> Mean NO_AUG gap: {mean_no_aug_gap if mean_no_aug_gap is not None else 'N/A'}%")
         print(f">> Mean AUG gap: {mean_aug_gap if mean_aug_gap is not None else 'N/A'}%")
-
-        # --- Conditional printing for Local Search ---
-        if self.tester_params['run_local_search'] and ls_gap_list:  # make sure you collected LS gaps
-            mean_ls_gap = round(np.mean(ls_gap_list), 3)
-            print(f">> Mean TuneNSearch gap: {mean_ls_gap if mean_ls_gap is not None else 'N/A'}%")

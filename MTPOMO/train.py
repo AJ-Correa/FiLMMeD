@@ -77,7 +77,7 @@ trainer_params = {
     'cuda_device_num': CUDA_DEVICE_NUM,
     'epochs': 300,
     'train_episodes': 100000,
-    'train_batch_size': 256,
+    'train_batch_size': 128,
     'use_autocast': True,
     'seed': 1234,
     'config_name': 'train_'+env_params['problem_type']+'_n'+str(env_params['problem_size'])+'_mtpomo_film_curriculum',

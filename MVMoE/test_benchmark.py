@@ -70,11 +70,6 @@ tester_params = {
     'use_autocast': True,
     'sample_size': 1,
     'seed': 1234,
-    'run_local_search': False,
-    'ls_params': {
-        'num_ls_iters': 100,
-        'granular_neighborhood': 20,
-    }
 }
 
 
