@@ -72,7 +72,7 @@ tuner_params = {
     'finetuning_episodes': 100000,
     'finetuning_batch_size': 128,
     'loss_type': 'po_loss',  # 'po_loss' or 'rl_loss'
-    'finetuning_lr': 3e-4,
+    'finetuning_lr': 1e-4,
     'finetuning_weight_decay': 1e-6,
     'finetuning_lr_milestones': [270, 295],
     'finetuning_lr_gamma': 0.1,
@@ -92,10 +92,10 @@ tuner_params = {
         },
     },
     'model_load': {
-        'enable': True,  # enable if loading a checkpoint from an unfinished fine-tuning session
-        'path': './result/20251121_043832_tune_full_task_set_n50_mvmoe_film_tune_singledepot',
+        'enable': False,  # enable if loading a checkpoint from an unfinished fine-tuning session
+        'path': './checkpoints/MDVRP50/',
         # directory path of pre-trained model and log files saved.
-        'epoch': 400,  # epoch version of pre-trained model to load
+        'epoch': 300,  # epoch version of pre-trained model to load
     },
 }
 

@@ -63,7 +63,7 @@ tuner_params = {
     'finetuning_epochs': 300,
     'finetuning_episodes': 100000,
     'finetuning_batch_size': 128,
-    'loss_type': 'rl_loss',  # 'po_loss' or 'rl_loss'
+    'loss_type': 'po_loss',  # 'po_loss' or 'rl_loss'
     'finetuning_lr': 1e-4,
     'finetuning_weight_decay': 1e-6,
     'finetuning_lr_milestones': [270],
@@ -85,7 +85,7 @@ tuner_params = {
     },
     'model_load': {
         'enable': False,  # enable if loading a checkpoint from an unfinished fine-tuning session
-        'path': './result/VRP50/MTPOMO - fulltaskset, film, curriculum/20251024_034808_train_full_task_set_n50_mtpomo_film_curriculum',
+        'path': './checkpoints/MDVRP50/',
         # directory path of pre-trained model and log files saved.
         'epoch': 300,  # epoch version of pre-trained model to load
     },

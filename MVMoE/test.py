@@ -66,15 +66,15 @@ tester_params = {
     'use_cuda': USE_CUDA,
     'cuda_device_num': CUDA_DEVICE_NUM,
     'model_load': {
-        'path': './result/old_curriculum/VRP50/MVMoE - curriculum, 0.3, 0.6, 0.9, film/20250723_002940_train_full_task_set_n50_mvmoe_film_curriculum',
+        'path': './checkpoints/MDVRP50/',
         # directory path of pre-trained model and log files saved.
         'epoch': 300,  # epoch version of pre-trained model to load
     },
     'random_problems': False,
-    'num_random_problems': 250,
-    'test_batch_size': 500,
+    'num_random_problems': 1000,
+    'test_batch_size': 250,
     'augmentation_type': '8d',  # this parameter can be '1', '8', 'd' or '8d'
-    'aug_batch_size': 500,
+    'aug_batch_size': 250,
     'enable_finetuning': False,
     'use_autocast': True,
     'seed': 1234,

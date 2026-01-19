@@ -38,9 +38,9 @@ from VRPTester import VRPTester as Tester
 # problem_type can also be MDVRP, MDOVRP, MDVRPB, MDVRPTW, MDVRPL, MDVRPI and their any combinations, e.g., MDOVRPBLTW
 env_params = {
     'problem_type': 'full_task_set',
-    'problem_size': 200,
-    'pomo_size': 204,
-    'depot_size': 5,
+    'problem_size': 50,
+    'pomo_size': 52,
+    'depot_size': 3,
     'depot_trick': False,  # only for single-depot problems, when depot_size = 1
     'num_virtual_depots': 3,
 }
@@ -63,11 +63,11 @@ tester_params = {
     'use_cuda': USE_CUDA,
     'cuda_device_num': CUDA_DEVICE_NUM,
     'model_load': {
-        'path': './result//MDVRP100/MTPOMO - fulltaskset, curriculum, film/20251023_111309_train_full_task_set_n100_mtpomo_full_task_set_film_curriculum',  # directory path of pre-trained model and log files saved.
+        'path': './checkpoints/MDVRP50/',  # directory path of pre-trained model and log files saved.
         'epoch': 300,  # epoch version of pre-trained model to load
     },
-    'random_problems': True,
-    'num_random_problems': 100,
+    'random_problems': False,
+    'num_random_problems': 1000,
     'test_batch_size': 250,
     'augmentation_type': '8d', # this parameter can be '1', '8', 'd' or '8d'
     'aug_batch_size': 250,

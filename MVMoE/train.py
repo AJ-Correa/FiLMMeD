@@ -44,11 +44,11 @@ from VRPTrainer import VRPTrainer
 # introduced, at 60% variants with three constraints, and 90% variants with four constraints
 
 env_params = {
-    'problem_type': 'unified',
+    'problem_type': 'full_task_set',
     'problem_size': 50,
     'pomo_size': 52,
     'depot_size': 3,
-    'curriculum': False,
+    'curriculum': True,
     'curriculum_schedule': [0.3, 0.6, 0.9]
 }
 
@@ -70,7 +70,7 @@ model_params = {
     'expert_loc': ['Enc0', 'Enc1', 'Enc2', 'Enc3', 'Enc4', 'Enc5', 'Dec'],
     'routing_level': 'node',
     'routing_method': 'input_choice',
-    'use_film': False,
+    'use_film': True,
 }
 
 optimizer_params = {
@@ -103,8 +103,8 @@ trainer_params = {
     },
     'model_load': {
         'enable': False,  # enable loading pre-trained model
-        'path': './result/20251007_210531_train_unified_n100_mvmoe_film',  # directory path of pre-trained model and log files saved.
-        'epoch': 290  # epoch version of pre-trained model to laod.
+        'path': '',  # directory path of pre-trained model and log files saved.
+        'epoch': 300  # epoch version of pre-trained model to load.
     }
 }
 

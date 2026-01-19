@@ -44,7 +44,7 @@ from VRPTrainer import VRPTrainer
 # introduced, at 60% variants with three constraints, and 90% variants with four constraints
 
 env_params = {
-    'problem_type': 'unified',
+    'problem_type': 'full_task_set',
     'problem_size': 50,
     'pomo_size': 52,
     'depot_size': 3,
@@ -62,7 +62,7 @@ model_params = {
     'ff_hidden_dim': 512,
     'eval_type': 'argmax',
     'norm': 'instance',
-    'use_film': False,
+    'use_film': True,
 }
 
 optimizer_params = {
@@ -95,8 +95,8 @@ trainer_params = {
     },
     'model_load': {
         'enable': False,  # enable loading pre-trained model
-        'path': './result/20251023_012447_train_full_task_set_n50_mtpomo_film_curriculum',  # directory path of pre-trained model and log files saved.
-        'epoch': 260 # epoch version of pre-trained model to laod.
+        'path': '',  # directory path of pre-trained model and log files saved.
+        'epoch': 300  # epoch version of pre-trained model to load.
     }
 }
 

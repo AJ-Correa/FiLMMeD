@@ -75,9 +75,9 @@ python train.py
 | Parameter | Description | Default |
 |:----------|:------------|:--------|
 | `problem_type` | Variant(s) to train on. Use `'unified'` for single-constraint variants only, `'full_task_set'` for all variants, or specific variants like `'MDVRP'`, `'MDOVRPTW'`, etc. | `'full_task_set'` |
-| `problem_size` | Number of customer nodes | `50` |
-| `pomo_size` | Number of POMO starting nodes. Should be `problem_size + depot_size - 1` for MDVRP | `52` |
-| `depot_size` | Number of depots (we used `3` for MDVRP) | `3` |
+| `problem_size` | Number of customer nodes | `50` or `100` |
+| `pomo_size` | Number of POMO starting nodes. Should be `problem_size + depot_size - 1` for MDVRP | `52` or `102` |
+| `depot_size` | Number of depots | `3` |
 | `curriculum` | Enable curriculum learning | `True` |
 | `curriculum_schedule` | Epoch fractions to introduce 2-, 3-, and 4-constraint variants | `[0.3, 0.6, 0.9]` |
 
@@ -107,10 +107,10 @@ python train.py
 | `model_save_interval` | Save checkpoint every N epochs | `20` |
 | `model_load.enable` | Load from checkpoint to resume training | `False` |
 | `model_load.path` | Path to checkpoint directory | `''` |
-| `model_load.epoch` | Epoch to load from | `0` |
+| `model_load.epoch` | Epoch to load from | `''` |
 
 <details>
-<summary>📋 <b>Settings for MDVRP 50 nodes</b> (click to expand)</summary>
+<summary>📋 <b>Settings to train FiLMMeD for MDVRP with 50 nodes</b> (click to expand)</summary>
 
 Set the following in `train.py`:
 ```python
@@ -123,7 +123,6 @@ env_params = {
     'curriculum_schedule': [0.3, 0.6, 0.9]
 }
 model_params['use_film'] = True
-trainer_params['train_batch_size'] = 128
 ```
 
 Then run:
@@ -134,7 +133,7 @@ python train.py
 </details>
 
 <details>
-<summary>📋 <b>Settings for MDVRP 100 nodes</b> (click to expand)</summary>
+<summary>📋 <b>Settings to train FiLMMeD for MDVRP with 100 nodes</b> (click to expand)</summary>
 
 Set the following in `train.py`:
 ```python
@@ -147,7 +146,6 @@ env_params = {
     'curriculum_schedule': [0.3, 0.6, 0.9]
 }
 model_params['use_film'] = True
-trainer_params['train_batch_size'] = 64
 ```
 
 Then run:
@@ -161,7 +159,7 @@ python train.py
 
 ### 🎯 Fine-tuning for Single-Depot VRPs (`tune.py`)
 
-After training on MDVRP, you can fine-tune the model on single-depot VRPs using Preference Optimization.
+After training on MDVRP, you can fine-tune the model on single-depot VRPs using Preference Optimization, as we did in our experiments.
 
 #### 🌍 Environment Parameters for Fine-tuning
 
@@ -184,10 +182,10 @@ After training on MDVRP, you can fine-tune the model on single-depot VRPs using 
 | `alpha` | PO entropy regularization (only for `po_loss`) | `0.03` |
 | `model_load.enable` | Set to `True` only if resuming an interrupted fine-tuning | `False` |
 | `model_load.path` | Path to pre-trained MDVRP checkpoint | `''` |
-| `model_load.epoch` | Epoch to load from | `300` |
+| `model_load.epoch` | Epoch to load from | `''` |
 
 <details>
-<summary>📋 <b>Settings for VRP 50 nodes</b> (from MDVRP50 checkpoint) (click to expand)</summary>
+<summary>📋 <b>Settings for VRP with 50 nodes</b> (from MDVRP50 checkpoint) (click to expand)</summary>
 
 Set the following in `tune.py`:
 ```python
@@ -199,7 +197,6 @@ env_params = {
 }
 model_params['use_film'] = True
 tuner_params['loss_type'] = 'po_loss'
-tuner_params['finetuning_batch_size'] = 128
 tuner_params['model_load'] = {
     'enable': True,  # True only if resuming an interrupted fine-tuning
     'path': './checkpoints/MDVRP50/',  # Path to pre-trained MDVRP model
@@ -215,7 +212,7 @@ python tune.py
 </details>
 
 <details>
-<summary>📋 <b>Settings for VRP 100 nodes</b> (from MDVRP100 checkpoint) (click to expand)</summary>
+<summary>📋 <b>Settings for VRP with 100 nodes</b> (from MDVRP100 checkpoint) (click to expand)</summary>
 
 Set the following in `tune.py`:
 ```python
@@ -227,7 +224,6 @@ env_params = {
 }
 model_params['use_film'] = True
 tuner_params['loss_type'] = 'po_loss'
-tuner_params['finetuning_batch_size'] = 64
 tuner_params['model_load'] = {
     'enable': False,
     'path': './checkpoints/MDVRP100/',
@@ -258,8 +254,8 @@ python test.py
 | Parameter | Description | Default |
 |:----------|:------------|:--------|
 | `problem_type` | `'full_task_set'` for all variants, or `'unified'` for single-constraint ones | `'full_task_set'` |
-| `problem_size` | Number of nodes | `50` |
-| `pomo_size` | `problem_size + depot_size - 1` | `52` for MDVRP50, `102` for MDVRP100 |
+| `problem_size` | Number of customer nodes | `50` |
+| `pomo_size` | Number of POMO starting nodes | `52` for MDVRP50, `102` for MDVRP100 |
 | `depot_size` | Number of depots | `3` for MDVRP, `1` for single-depot |
 
 #### 🎛️ Tester Parameters (`tester_params`)
@@ -268,8 +264,8 @@ python test.py
 |:----------|:------------|:--------|
 | `model_load.path` | Path to checkpoint directory | `'./checkpoints/MDVRP50/'` |
 | `model_load.epoch` | Epoch to load | `300` |
-| `random_problems` | Generate random test instances | `True` |
-| `num_random_problems` | Number of test instances | `100` |
+| `random_problems` | Generate random test instances | `False` |
+| `num_random_problems` | Number of random test instances, if `random_problems is True` | `1000` |
 | `test_batch_size` | Batch size for testing | `250` |
 | `augmentation_type` | `'1'` (none), `'8'` (POMO x8), `'d'` (7+d), `'8d'` (8*d) | `'8d'` |
 | `aug_batch_size` | Batch size when using augmentation | `250` |
