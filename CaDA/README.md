@@ -199,29 +199,6 @@ python run.py --n_size 50 --batch_size 256 --test --resume --epoch 150 --path_id
 
 ---
 
-## 📖 Citation
-
-If you find this work useful, please cite:
-
-```bibtex
-@article{correa2025filmed,
-  title={FiLMMeD: Feature-wise Linear Modulation for Cross-Problem Multi-Depot Vehicle Routing},
-  author={Corrêa, Arthur and Nascimento, Paulo and Moniz, Samuel},
-  year={2025}
-}
-
-@inproceedings{
-li2025cada,
-title={Ca{DA}: Cross-Problem Routing Solver with Constraint-Aware Dual-Attention},
-author={Han Li and Fei Liu and Zhi Zheng and Yu Zhang and Zhenkun Wang},
-booktitle={Forty-second International Conference on Machine Learning},
-year={2025},
-url={https://openreview.net/forum?id=CS4RyQuTig}
-}
-```
-
----
-
 ## 📄 License
 
 This project is licensed under the MIT License.

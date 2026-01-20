@@ -44,10 +44,8 @@ FiLMMeD-MTPOMO and FiLMMeD-MVMoE include trained checkpoints for:
 ## ⚙️ Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/AJ-Correa/FiLMMeD.git
+# After cloning the repository
 cd FiLMMeD
-
 # Install dependencies
 pip install torch torchvision torchaudio
 pip install tensordict torchrl rich wandb pandas openpyxl PyYAML
@@ -331,20 +329,6 @@ python test.py
 ## 🔬 CaDA
 
 CaDA has a different codebase structure. See [CaDA/README.md](CaDA/README.md) for specific instructions.
-
----
-
-## 📖 Citation
-
-If you find this work useful, please cite:
-
-```bibtex
-@article{correa2025filmed,
-  title={FiLMMeD: Feature-wise Linear Modulation for Cross-Problem Multi-Depot Vehicle Routing},
-  author={Corrêa, Arthur and Nascimento, Paulo and Moniz, Samuel},
-  year={2025}
-}
-```
 
 ---
 
