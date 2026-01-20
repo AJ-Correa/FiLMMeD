@@ -35,7 +35,7 @@ def get_dataloader(dataset, batch_size, ddp=False, num_workers=0):
         # if isinstance(batch_size, int): batch_size = [batch_size] * dataloader_num
         # assert len(batch_size) == dataloader_num, f"Batch size: {len(batch_size)} and number of datasets {dataloader_num}"
         # size_bs = {50:500, 100:500, 200:150, 300:80}
-        size_bs = {50: 500, 100: 1000, 200: 125, 300: 100}
+        size_bs = {50: 1000, 100: 1000, 200: 125, 300: 100}
         # size_bs = {50: 500, 100: 250, 200: 85, 300: 100}
         batch_size = [size_bs[int(x.split('_')[0])] for x in list(dataset.keys())]
         return {
@@ -144,7 +144,7 @@ class MTVRPEnv(EnvBase):
         td.set("action_mask", self.get_action_mask(td))
         return td
 
-    def reset(self, td: Optional[TensorDict] = None, batch_size=None) -> TensorDict:
+    def reset(self, td: Optional[TensorDict] = None, batch_size=None, lib_data=False) -> TensorDict:
         """Reset function to call at the beginning of each episode"""
         if batch_size is None:
             batch_size = td.batch_size
@@ -152,35 +152,118 @@ class MTVRPEnv(EnvBase):
             td = self.generator(batch_size=batch_size).to('cuda')
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
         self.to(td.device)
-        return super().reset(td, batch_size=batch_size)
+        return super().reset(td, batch_size=batch_size,lib_data=lib_data)
 
-    def _reset(self, td: Optional[TensorDict] = None, batch_size: Optional[list] = None,) -> TensorDict:
+    def _reset(self, td: Optional[TensorDict] = None, batch_size: Optional[list] = None, lib_data=False) -> TensorDict:
 
         device = td.device
-        # Create reset TensorDict
-        td_reset = TensorDict(
-            {
-                "locs": td["locs"],
-                "demand_backhaul": td["demand_backhaul"],
-                "demand_linehaul": td["demand_linehaul"],
-                "distance_limit": td["distance_limit"],
-                "service_time": td["service_time"],
-                "open_route": td["open_route"],
-                "time_windows": td["time_windows"],
-                "vehicle_capacity": td["vehicle_capacity"],
-                "capacity_original": td["capacity_original"],
-                "speed": td["speed"],
-                "current_node": torch.zeros((*batch_size,), dtype=torch.long, device=device),
-                "current_route_length": torch.zeros((*batch_size, 1), dtype=torch.float32, device=device),  # for distance limits
-                "current_time": torch.zeros((*batch_size, 1), dtype=torch.float32, device=device),  # for time windows
-                "used_capacity_backhaul": torch.zeros((*batch_size, 1), device=device),  # for capacity constraints in backhaul
-                "used_capacity_linehaul": torch.zeros((*batch_size, 1), device=device),  # for capacity constraints in linehaul
-                "visited": torch.zeros((*batch_size, td["locs"].shape[-2]), dtype=torch.bool, device=device,),
-            },
-            batch_size=batch_size,
-            device=device,
-        )
-        td_reset.set("action_mask", self.get_action_mask(td_reset))
+        if not lib_data:
+            # Create reset TensorDict
+            td_reset = TensorDict(
+                {
+                    "locs": td["locs"],
+                    "demand_backhaul": td["demand_backhaul"],
+                    "demand_linehaul": td["demand_linehaul"],
+                    "distance_limit": td["distance_limit"],
+                    "service_time": td["service_time"],
+                    "open_route": td["open_route"],
+                    "time_windows": td["time_windows"],
+                    "vehicle_capacity": td["vehicle_capacity"],
+                    "capacity_original": td["capacity_original"],
+                    "speed": td["speed"],
+                    "current_node": torch.zeros((*batch_size,), dtype=torch.long, device=device),
+                    "current_route_length": torch.zeros((*batch_size, 1), dtype=torch.float32, device=device),  # for distance limits
+                    "current_time": torch.zeros((*batch_size, 1), dtype=torch.float32, device=device),  # for time windows
+                    "used_capacity_backhaul": torch.zeros((*batch_size, 1), device=device),  # for capacity constraints in backhaul
+                    "used_capacity_linehaul": torch.zeros((*batch_size, 1), device=device),  # for capacity constraints in linehaul
+                    "visited": torch.zeros((*batch_size, td["locs"].shape[-2]), dtype=torch.bool, device=device,),
+                },
+                batch_size=batch_size,
+                device=device,
+            )
+            td_reset.set("action_mask", self.get_action_mask(td_reset))
+        else:
+            # Demands: linehaul (C) and backhaul (B). Backhaul defaults to 0
+            demand_linehaul = torch.cat(
+                [torch.zeros_like(td["demand_linehaul"][..., :1]), td["demand_linehaul"]],
+                dim=1,
+            )
+            demand_backhaul = td.get(
+                "demand_backhaul",
+                torch.zeros_like(td["demand_linehaul"]),
+            )
+            demand_backhaul = torch.cat(
+                [torch.zeros_like(td["demand_linehaul"][..., :1]), demand_backhaul], dim=1
+            )
+            # lih add
+            # demand_linehaul = td["demand_linehaul"]
+            # demand_backhaul = td["demand_backhaul"]
+            # Backhaul class (MB). 1 is the default backhaul class
+            backhaul_class = td.get(
+                "backhaul_class",
+                torch.full((*batch_size, 1), 1, dtype=torch.int32),
+            )
+
+            # Time windows (TW). Defaults to [0, inf] and service time to 0
+            time_windows = td.get("time_windows", None)
+            if time_windows is None:
+                time_windows = torch.zeros_like(td["locs"])
+                time_windows[..., 1] = float("inf")
+            service_time = td.get("service_time", torch.zeros_like(demand_linehaul))
+
+            # Open (O) route. Defaults to 0
+            open_route = td.get(
+                "open_route", torch.zeros_like(demand_linehaul[..., :1], dtype=torch.bool)
+            )
+
+            # Distance limit (L). Defaults to inf
+            distance_limit = td.get(
+                "distance_limit", torch.full_like(demand_linehaul[..., :1], float("inf"))
+            )
+
+            # Create reset TensorDict
+            td_reset = TensorDict(
+                {
+                    "locs": td["locs"],
+                    "demand_backhaul": demand_backhaul,
+                    "demand_linehaul": demand_linehaul,
+                    "backhaul_class": backhaul_class,
+                    "distance_limit": distance_limit,
+                    "service_time": service_time,
+                    "open_route": open_route,
+                    "time_windows": time_windows,
+                    "speed": td.get("speed", torch.ones_like(demand_linehaul[..., :1])),
+                    "vehicle_capacity": td.get(
+                        "vehicle_capacity", torch.ones_like(demand_linehaul[..., :1])
+                    ),
+                    "capacity_original": td.get(
+                        "capacity_original", torch.ones_like(demand_linehaul[..., :1])
+                    ),
+                    "current_node": torch.zeros(
+                        (*batch_size,), dtype=torch.long, device=device
+                    ),
+                    "current_route_length": torch.zeros(
+                        (*batch_size, 1), dtype=torch.float32, device=device
+                    ),  # for distance limits
+                    "current_time": torch.zeros(
+                        (*batch_size, 1), dtype=torch.float32, device=device
+                    ),  # for time windows
+                    "used_capacity_backhaul": torch.zeros(
+                        (*batch_size, 1), device=device
+                    ),  # for capacity constraints in backhaul
+                    "used_capacity_linehaul": torch.zeros(
+                        (*batch_size, 1), device=device
+                    ),  # for capacity constraints in linehaul
+                    "visited": torch.zeros(
+                        (*batch_size, td["locs"].shape[-2]),
+                        dtype=torch.bool,
+                        device=device,
+                    ),
+                },
+                batch_size=batch_size,
+                device=device,
+            )
+            td_reset.set("action_mask", self.get_action_mask(td_reset))  
         return td_reset
 
     def dataset(self, data_size=None, phase="train"):

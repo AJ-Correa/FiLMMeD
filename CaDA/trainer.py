@@ -3,8 +3,10 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 import os
 import random
 import time
+import vrplib
 
 import pandas as pd
+from math import ceil
 import torch
 import torch.distributed as dist
 from torch.cuda.amp import GradScaler, autocast
@@ -181,10 +183,17 @@ class VRPTrainer:
         """Main training loop that orchestrates epochs, validation, and checkpointing."""
         args = self.args
         self.time_estimator.reset(self.start_epoch)
-        # test before train
+        
+        # test before training
+        if args.test_lib: 
+            self.test_lib(self.start_epoch - 1)
+            return 
+        
         if args.test and self.start_epoch == 1:
             self.test(self.start_epoch - 1)
+            
         if args.test_only:
+            self.test(self.start_epoch - 1)
             exit(0)
 
         # begin train
@@ -516,3 +525,182 @@ class VRPTrainer:
                     for size, data in dict_.items():
                         df = pd.DataFrame(data)
                         df.to_excel(writer, sheet_name=str(size), index=False)
+    
+    @torch.no_grad()
+    def test_lib(self, epoch):
+        # with torch.amp.autocast("cuda"):
+        args = self.args
+        self.model.eval()
+        all_test_dataset = [
+            'A',
+            'B',
+            # # 'E',
+            'F',
+            # 'M',
+            'P',
+            'X',
+            # 'XML'
+        ]
+        size_limit = 201 #  if problem_size > problem_size_limit: continue
+        all_dataset_dict = {'A': [], 'B': [], 'F': [], 'M': [], 'P': [],
+                            'X-100-300': [], 'X-300-500': [], 'X-500-700': [], 'X-700-1000': []
+                            }  # opt score gap
+        # 
+        for dataset in all_test_dataset:
+            if dataset != 'XML':    
+                dataset_dir = f'./data/lib_data/{dataset}' 
+                sol_dir = f'./data/lib_data/{dataset}'
+            else:
+                dataset_dir = './data/lib_data/cvrplib-Set-XML100/generated_instances'
+                sol_dir = './data/lib_data/cvrplib-Set-XML100/generated_solutions'
+            path_list = [os.path.join(dataset_dir, x) for x in os.listdir(dataset_dir)]
+            aug_factor = 8
+            batch_size = 1
+            
+            all_gap, all_aug_gap, all_aug_score = [], [], []
+            gap_dict, aug_gap_dict = {},{}
+            aug_score_dict = {}
+            time_dict = {}
+            opt_score_dict = {}
+            
+            if dataset == 'X':
+                X_opt_score_list = [[], [], [], []]  # 100-300, 300-500, 500-700, 700-1000
+                X_aug_score_dic = [[], [], [], []]  # 100-300, 300-500, 500-700, 700-1000
+                X_aug_gap_dict = [[], [], [], []]  # 100-300, 300-500, 500-700, 700-1000
+            for path in path_list:
+
+                if os.path.isdir(path):
+                    continue
+
+                if path.endswith(".sol"):
+                    continue
+
+                if os.path.basename(path).startswith('.'):
+                    continue
+                # begin _solve_cvrplib                
+                # get problem
+                problem = vrplib.read_instance(path)
+                coords = torch.tensor(problem['node_coord']).float()
+                coords_norm, scale = normalize_coord(coords)
+                original_capacity = problem['capacity']
+                demand = torch.tensor(problem['demand'][1:]).float() / original_capacity
+                original_capacity = torch.tensor(original_capacity)[None]                  
+                td_instance = TensorDict({
+                    "locs": coords_norm.unsqueeze(0), 
+                    "demand_linehaul": demand.unsqueeze(0), 
+                    "capacity_original": original_capacity.unsqueeze(0),
+                }, batch_size=[1])
+                td_reset = self.env.reset(td_instance,lib_data=True).to('cuda')
+                # get p_s_tag
+                keep_mask = torch.zeros((td_reset.shape[0],5), dtype=torch.bool) # 'c', 'o', 'tw', 'l', 'b'
+                keep_mask[:, 0] = True
+                td_reset['p_s_tag'] = torch.cat((
+                    keep_mask.float(),
+                    torch.full_like(td_reset['open_route'], td_reset['locs'].shape[1]/2000, dtype=torch.float32,device=td_instance.device)
+                ),dim=-1)
+                # num_features = 5
+                # num_combinations = 2 ** num_features  
+                # codes = torch.tensor([[(i >> j) & 1 for j in range(num_features)] for i in range(num_combinations)], dtype=torch.bool) # 32,5
+                # td_reset = batchify(td_reset, codes.shape[0])
+                # td_reset['p_s_tag'] = torch.cat((
+                #     codes.float(),
+                #     torch.full_like(td_reset['open_route'], td_reset['locs'].shape[1]/2000, dtype=torch.float32,device=td_instance.device)
+                # ),dim=-1)
+                # batch_size = codes.shape[0]
+                #
+                if size_limit is not None and td_reset['locs'].shape[1] > size_limit:
+                    continue
+                # get opt cost 
+                instance_name = os.path.basename(path).split('.')[0]
+                if dataset == 'XML':
+                    sol_path = os.path.join(sol_dir, f"{instance_name}.vrp.sol")
+                else:
+                    sol_path = os.path.join(sol_dir, f"{instance_name}.sol")
+                solution = vrplib.read_solution(sol_path)
+                opt = solution['cost'] # note that this cost is somehow slightly lower than the one calculated from the distance matrix
+                
+               # solve
+                start_time = time.time()
+                td = self.augmentation(td_reset) 
+                if args.ddp: torch.distributed.barrier()
+                out = self.model(td, self.env) 
+                use_time = time.time()-start_time
+                all_reward = out["reward"].view(-1, self.augmentation.num_augment, batch_size) 
+                all_reward = rearrange(all_reward, 'r a b -> (r b) a').unsqueeze(-1)
+                
+                all_reward, _ = all_reward.max(dim=0) 
+                score = -all_reward[0, :].float().item() 
+                aug_reward, _ = all_reward.max(dim=0) 
+                aug_score = -aug_reward.float().item() 
+                score, aug_score = ceil(score * scale), ceil(aug_score * scale)
+                gap = (score - opt) / opt * 100
+                aug_gap = (aug_score - opt) / opt * 100
+                args.log(f"{instance_name}, aug score {aug_score:.1f}, aug gap {aug_gap:.1f}%")
+                
+                # update
+                all_gap.append(gap)
+                all_aug_gap.append(aug_gap)
+                all_aug_score.append(aug_score) # <--- NEW: Append score here
+                
+                gap_dict[instance_name]=gap
+                aug_gap_dict[instance_name] = aug_gap
+                aug_score_dict[instance_name] = aug_score
+                time_dict[instance_name] = use_time
+                opt_score_dict[instance_name] = opt
+
+                num = int(instance_name.split('_')[0][3:]) if dataset == 'XML' else int(instance_name.split('-')[1][1:])
+                if dataset == 'X':
+                    idx_ = 0 if num <= 300 else (1 if num <= 500 else (2 if num <= 700 else 3))
+                    X_opt_score_list[idx_].append(opt)
+                    X_aug_score_dic[idx_].append(aug_score)
+                    X_aug_gap_dict[idx_].append(aug_gap)
+
+            if len(all_aug_gap) > 0:
+                avg_gap = sum(all_aug_gap) / len(all_aug_gap)
+                avg_obj = sum(all_aug_score) / len(all_aug_score)
+                args.log(f"\nDataset {dataset}: Avg aug Obj {avg_obj:.1f}, Avg aug Gap {avg_gap:.2f}%\n")
+            else:
+                args.log(f"\nDataset {dataset}: No instances found or all skipped.\n")
+            # save excel
+            data = {'Instance Name': list(gap_dict.keys()),
+                    'Opt Score': [opt_score_dict[name] for name in gap_dict.keys()],
+                    'Aug Score': [aug_score_dict[name] for name in gap_dict.keys()],
+                    'Aug Gap': [aug_gap_dict[name] for name in gap_dict.keys()],
+                    'Use Time': [time_dict[name] for name in gap_dict.keys()],
+                    }
+            df = pd.DataFrame(data)
+            df = df.sort_values('Instance Name')
+            df.to_excel(f'{args.result_dir}/{dataset}.xlsx', index=False, engine='openpyxl')
+            # update all xlsx
+            if dataset != 'X' and dataset != 'XML':
+                all_dataset_dict[dataset] = [np.mean(list(opt_score_dict.values())),
+                                             np.mean(list(aug_score_dict.values())),
+                                             np.mean(list(aug_gap_dict.values())),
+                                             ]
+            elif dataset == 'X':
+                for idx_, num_ in enumerate(['100-300', '300-500', '500-700', '700-1000']):
+                    all_dataset_dict[f'X-{num_}'] = [np.mean(X_opt_score_list[idx_]),
+                                                     np.mean(X_aug_score_dic[idx_]),
+                                                     np.mean(X_aug_gap_dict[idx_])
+                                                     ]
+        # save all dataset xlsx
+        all_dataset_dict_ =  {}     
+        for key, value in  all_dataset_dict.items():
+            if len(value) !=0:
+                all_dataset_dict_[key] = value
+        df = pd.DataFrame(all_dataset_dict_)
+        df.to_excel(f'{args.result_dir}/cvrplib.xlsx', index=False, engine='openpyxl')
+    
+def normalize_coord(coord:torch.Tensor) -> torch.Tensor: 
+    x, y = coord[:, 0], coord[:, 1]
+    x_min, x_max = x.min(), x.max()
+    y_min, y_max = y.min(), y.max()
+    
+    scale = max((x_max - x_min) , (y_max - y_min))
+    # x_scaled = (x - x_min) / (x_max - x_min) 
+    # y_scaled = (y - y_min) / (y_max - y_min)
+    x_scaled = (x - x_min) / scale
+    y_scaled = (y - y_min) / scale
+    coord_scaled = torch.stack([x_scaled, y_scaled], dim=1)
+    # return coord_scaled
+    return coord_scaled, scale
