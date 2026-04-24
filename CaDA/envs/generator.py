@@ -445,4 +445,3 @@ class MTVRPGenerator:
         # remove 'all', 'single_feat' from the list
         return list(VARIANT_GENERATION_PRESETS.keys())[3:]
 
-

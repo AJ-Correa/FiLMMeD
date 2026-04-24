@@ -6,141 +6,68 @@ from typing import Tuple, Union
 from dataclasses import dataclass, fields
 from tensordict import TensorDict
 from torch import Tensor
+import random
+import math
 
 from utils.functions import batchify, gather_by_index, unbatchify, unbatchify_and_gather
-
 from torch.nn.functional import scaled_dot_product_attention
-
-def linear_layer(input_dim, output_dim, std=1e-2, bias=True):
-    """Generates a linear module and initializes it."""
-    linear = nn.Linear(input_dim, output_dim, bias=bias)
-    nn.init.normal_(linear.weight, std=std)
-    nn.init.zeros_(linear.bias)
-    return linear
-
-
-@dataclass
-class PrecomputedCache:
-    node_embeddings: Tensor
-    glimpse_key: Tensor
-    glimpse_val: Tensor
-    logit_key: Tensor
-
-    @property
-    def fields(self):
-        return tuple(getattr(self, x.name) for x in fields(self))
-
-    def batchify(self, num_starts):
-        new_embs = []
-        for emb in self.fields:
-            if isinstance(emb, Tensor) or isinstance(emb, TensorDict):
-                new_embs.append(batchify(emb, num_starts))
-            else:
-                new_embs.append(emb)
-        return PrecomputedCache(*new_embs)
-
-
-class PromptNet(nn.Module):
-    def __init__(self, args):
-        super().__init__()
-        # Extended to 5 constraints: O, TW, L, B, MB
-        input_dim = 5
-        output_dim = args.model_params["embedding_dim"]
-        self.logit_clipping = args.model_params["logit_clipping"]
-        self.p_num = args.model_params.get("p_num", 5)
-
-        layer1 = nn.Linear(input_dim, output_dim, bias=False)
-        nn.init.uniform_(layer1.weight)
-        self.model = nn.Sequential(
-            layer1,
-            nn.LayerNorm(output_dim),
-            linear_layer(output_dim, output_dim),
-            nn.ReLU(),
-            linear_layer(output_dim, output_dim // 8),  # task embedding
-            nn.LayerNorm(output_dim // 8),
-            linear_layer(output_dim // 8, self.p_num * output_dim),
-        )
-
-    def forward(self, td):
-        prompt_input = td["p_s_tag"][:, :5]
-        return {
-            "prompt": self.model(prompt_input).view(td.batch_size[0], self.p_num, -1)
-        }
-
-class FiLM(nn.Module):
-    """Feature-wise Linear Modulation (FiLM) layer.
-    
-    Applies learned affine transformation γ*x + β conditioned on constraint vector.
-    This allows the model to adapt its representations based on which VRP 
-    constraints are active (C, O, TW, L, B).
-    """
-    def __init__(self, num_constraints, embedding_dim):
-        super().__init__()
-        self.gamma = nn.Linear(num_constraints, embedding_dim)
-        self.beta = nn.Linear(num_constraints, embedding_dim)
-        
-        # Initialize to identity: gamma=1, beta=0
-        # This ensures that initially: output = 1*x + 0 = x
-        nn.init.zeros_(self.gamma.weight)
-        nn.init.ones_(self.gamma.bias)
-        nn.init.zeros_(self.beta.weight)
-        nn.init.zeros_(self.beta.bias)
-
-    def forward(self, x, cond):
-        # x: (batch, nodes, feature_dim) - node embeddings
-        # cond: (batch, condition_dim) - constraint vector
-        gamma = self.gamma(cond)  # (batch, feature_dim)
-        beta = self.beta(cond)    # (batch, feature_dim)
-        # Expand to match nodes: (batch, 1, feature_dim) -> broadcast
-        return gamma.unsqueeze(1) * x + beta.unsqueeze(1)
 
 
 class VRPModel(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.loss_mode = 'rl'
+        self.loss_mode = "rl"
         self.encoder = VRP_Encoder(**args.model_params)
         self.decoder = VRP_Decoder(**args.model_params)
-        self.encoded_nodes = None  # (batch, problem+1, EMBEDDING_DIM)
+        self.encoded_nodes = None  # (batch, N + M, EMBEDDING_DIM)
+        self.encoded_coords = None  # (batch, N + M, 2)
         self.now_p_type = None
-        self.prompt_net = PromptNet(args)
 
     @staticmethod
     def greedy(logprobs, mask=None):
         """Select the action with the highest probability."""
-        # [BS], [BS]
         selected = logprobs.argmax(dim=-1)
         if mask is not None:
-            assert (not (~mask).gather(1, selected.unsqueeze(-1)).data.any()
-                    ), "infeasible action selected"
+            assert not (~mask).gather(1, selected.unsqueeze(-1)).data.any(), (
+                "infeasible action selected"
+            )
         return selected
 
     @staticmethod
     def sampling(logprobs, log, mask=None):
-        """Sample an action with a multinomial distribution given by the log probabilities."""
+        """Sample an action with a multinomial distribution given to the log probabilities."""
         probs = logprobs.exp()
-        selected = torch.multinomial(probs, 1).squeeze(1)  #
+        selected = torch.multinomial(probs, 1).squeeze(1)
         if mask is not None:
             while (~mask).gather(1, selected.unsqueeze(-1)).data.any():
                 log("Sampled bad values, resampling!")
                 selected = probs.multinomial(1).squeeze(1)
-            assert (not (~mask).gather(1, selected.unsqueeze(-1)).data.any()), "infeasible action selected"
+            assert not (~mask).gather(1, selected.unsqueeze(-1)).data.any(), (
+                "infeasible action selected"
+            )
         return selected
 
     def set_loss_mode(self, mode: str):
+        """Set loss mode to RL or PO."""
         self.loss_mode = mode
-    
-    def forward(self, td, env, reld_alpha=1.0):
-        """Main forward pass: encode -> decode -> compute reward."""
-        args = self.args
-        # Generate task-specific prompts from constraint flags
-        p_out = self.prompt_net(td)
-        prompt = p_out["prompt"]
-        # Encode nodes to get embeddings
-        node_embed = self.encoder(td, prompt)
 
+    def forward(self, td, env, reld_alpha=1.0, with_greedy=False):
+        """Main forward pass: encode -> decode -> compute reward.
+
+        When ``with_greedy=True`` (used during PO+LS training) the environment
+        appends an extra start at depot node 0.  All normal POMO starts are
+        decoded by sampling; the depot-0 start is decoded greedily.  This
+        happens inside a single forward pass — no second encode, no extra call.
+        """
+        args = self.args
+
+        # Encode nodes to get embeddings
+        node_embed, node_coords = self.encoder(td)
+
+        # (valid only within the same forward/backward step)
         self.encoded_nodes = node_embed
+        self.encoded_coords = node_coords
 
         # Select POMO start nodes for multi-start decoding
         if self.training and self.loss_mode == "po":
@@ -151,7 +78,7 @@ class VRPModel(nn.Module):
         else:
             po_B = None
         num_starts, start_actions, greedy_mask = env.select_start_nodes(
-            td, po_B=po_B, with_greedy=False
+            td, po_B=po_B, with_greedy=with_greedy
         )
         start_actions = start_actions.to(td.device)
 
@@ -206,17 +133,21 @@ class VRPModel(nn.Module):
         decoder_single_head_k = node_embed.transpose(1, 2)
 
         cache = PrecomputedCache(
-            node_embed, decoder_k, decoder_v, decoder_single_head_k
+            node_embed, decoder_k, decoder_v, decoder_single_head_k, node_coords
         )
 
         # Autoregressive decoding loop
         step = 0
         while not td["done"].all():
             logprobs, mask, cache = self.decoder(td, cache, num_starts, reld_alpha=reld_alpha)
-
             if self.training:
-                # Sample for all starts
-                select = VRPModel.sampling(logprobs, self.args.log, mask)
+                # Sample for all starts; greedy for the depot-0 slot
+                if greedy_mask.any():
+                    select_sample = VRPModel.sampling(logprobs, self.args.log, mask)
+                    select_greedy = VRPModel.greedy(logprobs, mask)
+                    select = torch.where(greedy_mask, select_greedy, select_sample)
+                else:
+                    select = VRPModel.sampling(logprobs, self.args.log, mask)
             else:
                 select = VRPModel.greedy(logprobs, mask)
             logprobs = gather_by_index(logprobs, select, dim=1)
@@ -234,14 +165,12 @@ class VRPModel(nn.Module):
         assert (logprobs > -1000).data.all(), (
             "Logprobs should not be -inf, check sampling procedure!"
         )
-        out = {
+        return {
             "reward": td["reward"],
             "log_likelihood": logprobs,
             "tours": tours,
+            "ccl_active_steps": [],
         }
-
-        return out
-    
 
 class VRP_Encoder(nn.Module):
     def __init__(self, **model_params):
@@ -251,34 +180,14 @@ class VRP_Encoder(nn.Module):
         encoder_layer_num = self.model_params["encoder_layer_num"]
         self.embedding_depot = nn.Linear(3, embedding_dim)  # locs, distance_limit
         self.embedding_node = nn.Linear(7, embedding_dim)
-        self.p_num = self.model_params["p_num"]
-
-        # FiLM conditioning for constraints
-        self.use_film = model_params.get("use_film", False)
-        if self.use_film:
-            embedding_dim = self.model_params['embedding_dim']
-            self.film = FiLM(num_constraints=5, embedding_dim=embedding_dim)
-            
-        self.layers = nn.ModuleList(
-            [EncoderLayer(**model_params) for _ in range(encoder_layer_num)]
-        )
 
         model_params_copy = model_params.copy()
         model_params_copy["use_sparse"] = False
-        self.layers2 = nn.ModuleList(
+        self.layers = nn.ModuleList(
             [EncoderLayer(**model_params_copy) for _ in range(encoder_layer_num)]
         )
-        self.layers1combine = nn.ModuleList(
-            [nn.Linear(embedding_dim, embedding_dim) for _ in range(encoder_layer_num)]
-        )
-        self.layers2combine = nn.ModuleList(
-            [
-                nn.Linear(embedding_dim, embedding_dim)
-                for _ in range(encoder_layer_num - 1)
-            ]
-        )
 
-    def forward(self, td, prompt):
+    def forward(self, td):
         # Get number of depots (default to 1 for single-depot problems)
         if "num_depots" in td.keys():
             num_depots = td["num_depots"][0].item()  # Scalar, same for all batch items
@@ -315,39 +224,20 @@ class VRP_Encoder(nn.Module):
         bs, n, _7 = node_feats.shape  # n = number of customers
 
         # Embed depot and customer nodes separately
-        embedded_depot = self.embedding_depot(depot_feats)  # [batch, M, embed_dim] 
+        global_embeddings = self.embedding_depot(depot_feats)  # [batch, M, embed_dim]
         cust_embeddings = self.embedding_node(node_feats)  # [batch, N, embed_dim]
-        
-        # Apply FiLM: modulate embeddings based on constraint flags
-        if self.use_film:
-            constraint_vec = td["p_s_tag"][:, :5]
-            cust_embeddings = self.film(cust_embeddings, constraint_vec)
 
         # Concatenate depot and customer embeddings
         out = torch.cat(
-            (embedded_depot, cust_embeddings), -2
+            (global_embeddings, cust_embeddings), -2
         )  # [batch, M + N, embed_dim]
-        out2 = out
-        num_nodes = num_depots + n  # Total nodes = M depots + N customers
 
-        for i, layer in enumerate(self.layers):
-            out = layer(out)  ################# layer 1 (sparse)
+        # Process through transformer layers
+        for layer in self.layers:
+            out = layer(out)
+        return out, td["locs"] # (batch, M + N, embedding), (batch, M + N, 2)
 
-            if i == 0 and prompt is not None:
-                out2 = torch.cat((out2, prompt), dim=1)  # [batch, N+p_num, embed_dim]
-            out2 = self.layers2[i](out2)  ############# layer 2 (global)
-            
-            # combine - handle different sizes based on whether prompt is used
-            out = out + self.layers1combine[i](out2[:, :num_nodes])
-            if i != len(self.layers) - 1:
-                # combine
-                out2_ = out2[:, :num_nodes] + self.layers2combine[i](out)
-                if prompt is not None:
-                    out2_ = torch.cat((out2_, out2[:, -self.p_num:]), dim=1)
-                out2 = out2_
-        return out[:, :num_nodes]  # (batch, problem+1, embedding) 
 
-    
 class EncoderLayer(nn.Module):
     def __init__(self, **model_params):
         super().__init__()
@@ -363,43 +253,24 @@ class EncoderLayer(nn.Module):
         self.add_n_normalization_1 = AddAndNorm(**model_params)
         self.add_n_normalization_2 = AddAndNorm(**model_params)
 
-        if model_params["ffd"] == "ffd":
-            self.feed_forward = FeedForward(**model_params)
-        elif model_params["ffd"] == "siglu":
-            assert embedding_dim == 128
-            self.feed_forward = ParallelGatedMLP()
-        else:
-            raise NotImplementedError
-        self.attn_weight = None
-        if self.model_params["use_sparse"] == "topk":
-            self.attn_weight = nn.Parameter(
-                torch.tensor([0.2], dtype=torch.float, requires_grad=True)
-            )
+        self.feed_forward = ParallelGatedMLP()
 
-    def forward(
-        self, input1
-    ):
+    def forward(self, input1):
+        normed = self.add_n_normalization_1(None, input1)
+
         head_num = self.model_params["head_num"]
-        q = reshape_by_heads(self.Wq(input1), head_num=head_num)
-        k = reshape_by_heads(self.Wk(input1), head_num=head_num)
-        v = reshape_by_heads(self.Wv(input1), head_num=head_num)
+        q = reshape_by_heads(self.Wq(normed), head_num=head_num)
+        k = reshape_by_heads(self.Wk(normed), head_num=head_num)
+        v = reshape_by_heads(self.Wv(normed), head_num=head_num)
 
-        attn_weight = None
-        if self.model_params["use_sparse"] == "topk":
-            attn_weight = self.attn_weight
-
-        out_concat = multi_head_attention(
-            q,
-            k,
-            v,
-            sparse=self.model_params["use_sparse"],
-            attn_weight=attn_weight,
-        )
+        out_concat = multi_head_attention(q, k, v)
         multi_head_out = self.multi_head_combine(out_concat)
 
-        out1 = self.add_n_normalization_1(input1, multi_head_out)
-        out2 = self.feed_forward(out1)
-        out3 = self.add_n_normalization_2(out1, out2)
+        input2 = input1 + multi_head_out
+        normed2 = self.add_n_normalization_2(None, input2)
+        ff_out = self.feed_forward(normed2)
+        out3 = input2 + ff_out
+        
         return out3
 
 
@@ -413,6 +284,7 @@ class VRP_Decoder(nn.Module):
         self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+
         self.Wq_last = nn.Linear(embedding_dim + 5, head_num * qkv_dim, bias=False)
 
         # ReLD decoder
@@ -428,7 +300,8 @@ class VRP_Decoder(nn.Module):
         # Get embedding of current node
         cur_node = td["current_node"]
         cur_node_embedding = gather_by_index(cache.node_embeddings, cur_node, squeeze=False)
-
+        
+        # Standard Static State Embedding (Fallback)
         remaining_linehaul = td["vehicle_capacity"] - td["used_capacity_linehaul"]
         remaining_backhaul = td["vehicle_capacity"] - td["used_capacity_backhaul"]
         state_embedding = torch.cat([
@@ -438,7 +311,6 @@ class VRP_Decoder(nn.Module):
         context_embedding = torch.cat([cur_node_embedding, state_embedding], dim=-1)
 
         # Use cached static keys
-        new_node_embed = None
         glimpse_k = cache.glimpse_key
         glimpse_v = cache.glimpse_val
         logit_k = cache.logit_key
@@ -455,10 +327,8 @@ class VRP_Decoder(nn.Module):
 
         # ReLD: add residual connections and FFN
         if self.use_reld:
-            # We set a low reld_alpha during the first epoch of training to stabilize convergence
-            reld_contrib = cur_node_embedding + self.attr_mapping(
-            state_embedding.clone()
-            )
+            # We set reld_alpha to zero in the first epoch of training to stabilize convergence
+            reld_contrib = cur_node_embedding + self.attr_mapping(state_embedding.clone())
             mh_atten_out = mh_atten_out + (reld_alpha * reld_contrib)
             ffn_out = self.decoder_ffn(mh_atten_out)
             mh_atten_out = mh_atten_out + (reld_alpha * ffn_out)
@@ -491,14 +361,70 @@ class VRP_Decoder(nn.Module):
         return F.log_softmax(logits, dim=-1), mask, cache
 
 
-########################################
-# NN SUB CLASS / FUNCTIONS
+@dataclass
+class PrecomputedCache:
+    node_embeddings: Tensor
+    glimpse_key: Tensor
+    glimpse_val: Tensor
+    logit_key: Tensor
+    node_coords: Tensor = None  # (batch, seq_len, 2) for RoPE-2D
+
+    @property
+    def fields(self):
+        return tuple(getattr(self, x.name) for x in fields(self))
+
+    def batchify(self, num_starts):
+        new_embs = []
+        for emb in self.fields:
+            if isinstance(emb, Tensor) or isinstance(emb, TensorDict):
+                new_embs.append(batchify(emb, num_starts))
+            else:
+                new_embs.append(emb)
+        return PrecomputedCache(*new_embs)
+
+
+class AddAndNorm(nn.Module):
+    """Residual connection with normalization."""
+
+    def __init__(self, **model_params):
+        super().__init__()
+        embedding_dim = model_params["embedding_dim"]
+        self.norm_type = model_params["norm_type"]
+
+        self.norm = RMSNorm(embedding_dim)
+
+    def forward(self, input1, input2):
+        out = self.norm(input2)
+
+        return out
+
+class FeedForward(nn.Module):
+    """Standard feed-forward layer."""
+
+    def __init__(self, **model_params):
+        super().__init__()
+        embedding_dim = model_params["embedding_dim"]
+        ff_hidden_dim = model_params["ff_hidden_dim"]
+        self.W1 = nn.Linear(embedding_dim, ff_hidden_dim)
+        self.W2 = nn.Linear(ff_hidden_dim, embedding_dim)
+
+    def forward(self, input1):
+        return self.W2(F.relu(self.W1(input1)))
+
+
+def linear_layer(input_dim, output_dim, std=1e-2, bias=True):
+    """Generates a linear module and initializes it."""
+    linear = nn.Linear(input_dim, output_dim, bias=bias)
+    nn.init.normal_(linear.weight, std=std)
+    nn.init.zeros_(linear.bias)
+    return linear
+
+
 def reshape_by_heads(qkv, head_num):
-    # q.(batch, n, head_num*key_dim)   : n can be either 1 or PROBLEM_SIZE
     batch_s = qkv.size(0)
     n = qkv.size(1)
-    q_reshaped = qkv.reshape(batch_s, n, head_num, -1)  # (batch, n, head_num, key_dim)
-    q_transposed = q_reshaped.transpose(1, 2)  # (batch, head_num, n, key_dim)
+    q_reshaped = qkv.reshape(batch_s, n, head_num, -1)
+    q_transposed = q_reshaped.transpose(1, 2)
     return q_transposed
 
 
@@ -507,115 +433,63 @@ def multi_head_attention(
     k,
     v,
     ninf_mask=None,
-    sparse=False,
-    attn_weight=None,
     use_efficient=True,
 ):
     """Multi-head attention with optional memory-efficient implementation."""
     batch_s, head_num, n, key_dim = q.shape
     input_s = k.size(2)
 
-    # Sparse attention variants
-    if sparse == "topk":
-        score = torch.matmul(q, k.transpose(2, 3))
-        score_scaled = score * (key_dim**-0.5)
+    if use_efficient:
         if ninf_mask is not None:
-            score_scaled = score_scaled + ninf_mask[:, None, :, :].expand(
+            attn_mask = ninf_mask[:, None, :, :].expand(
                 batch_s, head_num, n, input_s
             )
+        else:
+            attn_mask = None
 
-        k_ = n // 2
-        mask = torch.zeros(
-            batch_s, head_num, n, n, device=score.device, requires_grad=False
+        out = scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=False,
         )
-        mask.scatter_(-1, torch.topk(score_scaled, k=k_, dim=-1, largest=True)[1], 1.0)
-        attn = torch.where(
-            mask > 0, score_scaled, torch.full_like(score_scaled, float("-inf"))
-        )
-        attn = attn.softmax(dim=-1)
-        out = (attn @ v) * attn_weight
-
         out_transposed = out.transpose(1, 2)
         return out_transposed.reshape(batch_s, n, head_num * key_dim)
-
-    elif sparse == "relu":
+    else:
         score = torch.matmul(q, k.transpose(2, 3))
         score_scaled = score * (key_dim**-0.5)
         if ninf_mask is not None:
             score_scaled = score_scaled + ninf_mask[:, None, :, :].expand(
                 batch_s, head_num, n, input_s
             )
-        weights = torch.relu(score_scaled) ** 2
+        weights = torch.softmax(score_scaled, dim=-1)
         out = torch.matmul(weights, v)
         out_transposed = out.transpose(1, 2)
         return out_transposed.reshape(batch_s, n, head_num * key_dim)
 
-    # Standard attention
-    else:
-        if use_efficient:
-            if ninf_mask is not None:
-                attn_mask = ninf_mask[:, None, :, :].expand(
-                    batch_s, head_num, n, input_s
-                )
-            else:
-                attn_mask = None
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization."""
 
-            out = scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=attn_mask,
-                dropout_p=0.0,
-                is_causal=False,
-            )
-            out_transposed = out.transpose(1, 2)
-            return out_transposed.reshape(batch_s, n, head_num * key_dim)
-        else:
-            score = torch.matmul(q, k.transpose(2, 3))
-            score_scaled = score * (key_dim**-0.5)
-            if ninf_mask is not None:
-                score_scaled = score_scaled + ninf_mask[:, None, :, :].expand(
-                    batch_s, head_num, n, input_s
-                )
-            weights = torch.softmax(score_scaled, dim=-1)
-            out = torch.matmul(weights, v)
-            out_transposed = out.transpose(1, 2)
-            return out_transposed.reshape(batch_s, n, head_num * key_dim)
-
-
-class AddAndNorm(nn.Module):  # post norm: first add, then norm
-    def __init__(self, **model_params):
+    def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
-        embedding_dim = model_params['embedding_dim']
-        self.norm_type = model_params['norm_type']  # instance or layer
-        if self.norm_type == 'instance':
-            self.norm = nn.InstanceNorm1d(embedding_dim, affine=True, track_running_stats=False)
-        elif self.norm_type == 'layer':  # layer
-            self.norm = nn.LayerNorm(embedding_dim)
-        elif self.norm_type == 'rms':  # layer
-            self.norm = RMSNorm(embedding_dim)
-        else:
-            raise NotImplementedError
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
 
-    def forward(self, input1, input2):
-        # input: (batch, problem, embedding)
-        added = input1 + input2  # (batch, problem, embedding)
-        if self.norm_type == 'instance':
-            out = self.norm(added.transpose(1, 2)).transpose(1, 2)  # (batch, problem, embedding)
-        else:  # layer rms
-            out = self.norm(added)  # (batch, problem, embedding)
-        return out
-
+    def forward(self, x):
+        norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return norm.type_as(x) * self.weight
 
 class ParallelGatedMLP(nn.Module):
     """From https://github.com/togethercomputer/stripedhyena"""
 
     def __init__(
-            self,
-            hidden_size: int = 128,
-            inner_size_multiple_of: int = 256,
-            mlp_activation: str = "silu",
-            model_parallel_size: int = 1,
+        self,
+        hidden_size: int = 128,
+        inner_size_multiple_of: int = 256,
+        mlp_activation: str = "silu",
+        model_parallel_size: int = 1,
     ):
         super().__init__()
         multiple_of = inner_size_multiple_of
@@ -629,70 +503,19 @@ class ParallelGatedMLP(nn.Module):
         self.multiple_of = multiple_of * model_parallel_size
         inner_size = int(2 * hidden_size * 4 / 3)
         inner_size = self.multiple_of * (
-                (inner_size + self.multiple_of - 1) // self.multiple_of
-        )  # 512
+            (inner_size + self.multiple_of - 1) // self.multiple_of
+        )
 
         self.l1 = nn.Linear(
-            in_features=hidden_size,
-            out_features=inner_size,
-            bias=False,
+            in_features=hidden_size, out_features=inner_size, bias=False
         )
         self.l2 = nn.Linear(
-            in_features=hidden_size,
-            out_features=inner_size,
-            bias=False,
+            in_features=hidden_size, out_features=inner_size, bias=False
         )
         self.l3 = nn.Linear(
-            in_features=inner_size,
-            out_features=hidden_size,
-            bias=False,
+            in_features=inner_size, out_features=hidden_size, bias=False
         )
 
     def forward(self, z):
         z1, z2 = self.l1(z), self.l2(z)
         return self.l3(self.act(z1) * z2)
-
-
-class FeedForward(nn.Module):
-    def __init__(self, **model_params):
-        super().__init__()
-        embedding_dim = model_params['embedding_dim']
-        ff_hidden_dim = model_params['ff_hidden_dim']
-        self.W1 = nn.Linear(embedding_dim, ff_hidden_dim)
-        self.W2 = nn.Linear(ff_hidden_dim, embedding_dim)
-
-    def forward(self, input1):
-        # input.(batch, problem, embedding)
-        return self.W2(F.relu(self.W1(input1)))
-
-
-class GEGLU(nn.Module):
-    """
-    References:
-        Shazeer et al., "GLU Variants Improve Transformer," 2020.
-        https://arxiv.org/abs/2002.05202
-    """
-
-    def geglu(self, x: Tensor) -> Tensor:
-        assert x.shape[-1] % 2 == 0
-        a, b = x.chunk(2, dim=-1)
-        return a * F.gelu(b)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.geglu(x)
-
-
-class RMSNorm(nn.Module):
-    """From https://github.com/meta-llama/llama-models"""
-
-    def __init__(self, dim: int, eps: float = 1e-5, **kwargs):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
