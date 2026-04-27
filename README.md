@@ -343,4 +343,5 @@ This project is licensed under the MIT License.
 - [MTPOMO](https://github.com/FeiLiu36/MTNCO)
 - [MVMoE](https://github.com/RoyalSkye/Routing-MVMoE)
 - [CaDA](https://github.com/CIAM-Group/CaDA)
+- [RouteFinder](https://github.com/ai4co/routefinder)
 - [PO4COPs](https://github.com/MingjunPan/PO4COPs)

@@ -95,6 +95,7 @@ All hyperparameters are configured in `config.yaml`. Command-line arguments over
 | `use_sparse` | Sparse attention type (`'topk'`, `'relu'`, `'entmax15'`, etc.) | `'topk'` |
 | `p_num` | Number of prompt vectors in PromptNet | `5` |
 | `use_film` | ✨ Enable FiLM conditioning mechanism | `true` |
+| `use_reld` | ✨ Enable Rethinking Light Decode-based solvers (Huang et al., 2025) | `true` |
 
 ### 🎛️ Optimizer Parameters (`optimizer_params`)
 
@@ -148,6 +149,12 @@ All hyperparameters are configured in `config.yaml`. Command-line arguments over
 
 ---
 
+## Dataset download
+
+Before beginning, download the `data.zip` file from the original [CaDA repository](https://huggingface.co/datasets/Goodyee/CaDA/tree/main), and unzip it into the `data` folder, located in the root directory of the CaDA project.
+
+---
+
 ## 🏋️ Training
 
 ### Train on VRP with 50 nodes
@@ -156,6 +163,7 @@ Ensure `config.yaml` has:
 ```yaml
 model_params:
   use_film: true
+  use_reld: true  # True for FiLMMeD-CaDA†, False for FiLMMeD-CaDA
 
 trainer_params:
   loss_function: 'po'
@@ -180,14 +188,24 @@ python run.py --n_size 100 --batch_size 256 --test
 
 ### Test with pre-trained checkpoints
 
-**VRP 50 nodes:**
+**FiLMMeD-CaDA - VRP 50 nodes:**
 ```bash
-python run.py --n_size 50 --test --test_only --resume --epoch 300 --path_id "../checkpoints/VRP50"
+python run.py --n_size 50 --test --test_only --resume --epoch 300 --path_id "../checkpoints/FiLMMeD-CaDA/VRP50"
 ```
 
-**VRP 100 nodes:**
+**FiLMMeD-CaDA† - VRP 50 nodes:**
 ```bash
-python run.py --n_size 100 --test --test_only --resume --epoch 300 --path_id "../checkpoints/VRP100"
+python run.py --n_size 50 --test --test_only --resume --epoch 300 --path_id "../checkpoints/FiLMMeD-CaDA†/VRP50"
+```
+
+**FiLMMeD-CaDA - VRP 100 nodes:**
+```bash
+python run.py --n_size 100 --test --test_only --resume --epoch 300 --path_id "../checkpoints/FiLMMeD-CaDA/VRP100"
+```
+
+**FiLMMeD-CaDA† - VRP 100 nodes:**
+```bash
+python run.py --n_size 100 --test --test_only --resume --epoch 300 --path_id "../checkpoints/FiLMMeD-CaDA†/VRP100"
 ```
 
 ## 🏋️ Resume interrupted training

@@ -30,7 +30,7 @@ import torch.nn.functional as F
 
 from utils.utils import *
 from utils.functions import *
-from neural_baselines.mtpomo import VRPModel
+from model import VRPModel
 from envs.mtvrp import MTVRPEnv, get_dataloader
 from envs.transformer import StateAugmentation
 from tester import VRPTester
